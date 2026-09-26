@@ -1,22 +1,19 @@
 mod backup;
 mod dconf;
 mod desktop;
+mod icon;
 
 use anyhow::Result;
-use std::path::PathBuf;
 
 fn main() -> Result<()> {
-    println!("Scanning installed desktop applications...");
+    println!("Scanning installed desktop applications and icons...");
     let apps = desktop::get_app_map()?;
     println!("Found {} desktop applications.", apps.len());
 
-    let layout_str = dconf::read_layout()?;
-    let pages = dconf::parse_layout(&layout_str)?;
-    println!("Loaded GNOME layout with {} pages.", pages.len());
-
-    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let backup_path = backup::create_backup(&pages, &[], &current_dir)?;
-    println!("Backup created at: {}", backup_path.display());
+    for (id, entry) in apps.iter().take(5) {
+        let info = icon::get_icon_info(&entry.icon);
+        println!("{}: icon='{}' hue={:.1} sat={:.2} light={:.2}", id, entry.icon, info.avg_hue, info.avg_saturation, info.avg_lightness);
+    }
 
     Ok(())
 }
