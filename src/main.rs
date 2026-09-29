@@ -191,17 +191,12 @@ impl App {
 
     fn perform_sort(&mut self) {
         match sort_gradient_logic(&self.current_dir) {
-            Ok((backup_path, total_apps, total_pages)) => {
+            Ok((backup_path, total_apps, total_pages, folder_count)) => {
                 self.status_message = format!(
-                    "Gradient sort complete!
-Sorted {} apps across {} pages.
-
-Backup saved to:
-{}
-
-Press Super key twice to view your updated grid.",
+                    "Gradient sort complete!\nSorted {} apps across {} pages.\n{} shared-icon groups created and placed at the beginning (sorted by gradient).\n\nBackup saved to:\n{}\n\nPress Super key twice to view your updated grid.",
                     total_apps,
                     total_pages,
+                    folder_count,
                     backup_path.file_name().unwrap_or_default().to_string_lossy()
                 );
                 self.state = AppState::SortComplete;
@@ -517,12 +512,104 @@ struct GridItemSortData {
     is_monochrome: bool,
 }
 
+/// Find longest common word prefix for group naming
+fn longest_common_word_prefix(names: &[&str]) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+
+    let words_list: Vec<Vec<&str>> = names
+        .iter()
+        .map(|n| n.split_whitespace().collect())
+        .collect();
+
+    let mut common = Vec::new();
+    let min_len = words_list.iter().map(|w| w.len()).min().unwrap_or(0);
+
+    for i in 0..min_len {
+        let first_word = words_list[0][i];
+        if words_list
+            .iter()
+            .all(|w| w[i].eq_ignore_ascii_case(first_word))
+        {
+            common.push(first_word);
+        } else {
+            break;
+        }
+    }
+
+    if common.is_empty() {
+        None
+    } else {
+        Some(common.join(" "))
+    }
+}
+
+/// Determine a human-readable folder name for apps sharing the same icon
+fn determine_folder_name(
+    apps: &[String],
+    app_map: &HashMap<String, desktop::DesktopEntry>,
+    icon_name: &str,
+) -> String {
+    let names: Vec<&str> = apps
+        .iter()
+        .filter_map(|id| app_map.get(id).map(|e| e.name.as_str()))
+        .collect();
+
+    if !names.is_empty() {
+        if let Some(prefix) = longest_common_word_prefix(&names) {
+            if prefix.len() >= 3 {
+                return prefix;
+            }
+        }
+    }
+
+    let clean = icon_name
+        .trim_end_matches(".png")
+        .trim_end_matches(".svg")
+        .trim_end_matches(".xpm")
+        .replace(['-', '_'], " ");
+
+    clean
+        .split_whitespace()
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+            }
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
+/// Create a sanitized, stable folder ID
+fn sanitize_folder_id(key: &str) -> String {
+    let stem = Path::new(key)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(key);
+
+    let sanitized: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    format!("appmenu-group-{}", sanitized.trim_matches('-'))
+}
+
 /// Perform gradient sorting logic:
 /// 1. Start analysis without considering previous groupings (undo all groupings)
 /// 2. If multiple apps share the same icon, put them into the same group (GNOME app folder)
 /// 3. Sort those groups by color gradient and place them at the beginning of the grid
 /// 4. Follow with all single-app items, sorted by color gradient (rainbow flow + dark/black items grouped)
-pub fn sort_gradient_logic(output_dir: &Path) -> Result<(PathBuf, usize, usize)> {
+pub fn sort_gradient_logic(output_dir: &Path) -> Result<(PathBuf, usize, usize, usize)> {
     let layout_str = dconf::read_layout().context("Failed to read current dconf layout")?;
     let pages = dconf::parse_layout(&layout_str).context("Failed to parse dconf layout")?;
     let folder_children = dconf::read_folder_children().unwrap_or_default();
@@ -536,39 +623,105 @@ pub fn sort_gradient_logic(output_dir: &Path) -> Result<(PathBuf, usize, usize)>
     let all_apps = collect_all_apps_ungrouped(&app_map, &pages);
     let total_apps = all_apps.len();
 
-    let mut items: Vec<GridItemSortData> = Vec::new();
-    for id in &all_apps {
-        let name = app_map.get(id).map(|e| e.name.clone()).unwrap_or_else(|| id.clone());
-        let icon_name = app_map.get(id).map(|e| e.icon.as_str()).unwrap_or("");
-        let icon_info = icon::get_icon_info(icon_name);
-        items.push(GridItemSortData {
-            id: id.clone(),
-            display_name: name,
-            avg_hue: icon_info.avg_hue,
-            avg_lightness: icon_info.avg_lightness,
-            is_monochrome: icon_info.is_monochrome,
-        });
+    // Group apps by icon
+    let raw_groups = icon::group_apps_by_icon(&all_apps, &app_map);
+
+    let mut folder_items: Vec<GridItemSortData> = Vec::new();
+    let mut single_items: Vec<GridItemSortData> = Vec::new();
+    let mut active_folder_ids: Vec<String> = Vec::new();
+
+    for (icon_key, app_ids) in raw_groups {
+        let icon_info = icon::get_icon_info_for_key(&icon_key);
+
+        if app_ids.len() > 1 {
+            // Multiple apps share this icon -> put them in the same group (GNOME app folder)
+            let folder_name = determine_folder_name(&app_ids, &app_map, &icon_key);
+            let folder_id = sanitize_folder_id(&icon_key);
+
+            dconf::create_or_update_app_folder(&folder_id, &folder_name, &app_ids)
+                .context("Failed to create app folder in dconf")?;
+            active_folder_ids.push(folder_id.clone());
+
+            folder_items.push(GridItemSortData {
+                id: folder_id,
+                display_name: folder_name,
+                avg_hue: icon_info.avg_hue,
+                avg_lightness: icon_info.avg_lightness,
+                is_monochrome: icon_info.is_monochrome,
+            });
+        } else if let Some(app_id) = app_ids.first() {
+            let app_name = app_map
+                .get(app_id)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| app_id.clone());
+
+            single_items.push(GridItemSortData {
+                id: app_id.clone(),
+                display_name: app_name,
+                avg_hue: icon_info.avg_hue,
+                avg_lightness: icon_info.avg_lightness,
+                is_monochrome: icon_info.is_monochrome,
+            });
+        }
     }
 
-    let sort_items = |a: &GridItemSortData, b: &GridItemSortData| match (a.is_monochrome, b.is_monochrome) {
-        (false, false) => a.avg_hue.partial_cmp(&b.avg_hue).unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.avg_lightness.partial_cmp(&b.avg_lightness).unwrap_or(std::cmp::Ordering::Equal))
-            .then_with(|| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase())),
-        (false, true) => std::cmp::Ordering::Less,
-        (true, false) => std::cmp::Ordering::Greater,
-        (true, true) => a.avg_lightness.partial_cmp(&b.avg_lightness).unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase())),
-    };
+    let folder_count = folder_items.len();
 
-    items.sort_by(sort_items);
-    let final_grid_ids: Vec<String> = items.into_iter().map(|i| i.id).collect();
+    // Sort comparator: chromatic items sorted by rainbow hue (0..360), monochrome items sorted by lightness
+    let sort_items =
+        |a: &GridItemSortData, b: &GridItemSortData| match (a.is_monochrome, b.is_monochrome) {
+            (false, false) => a
+                .avg_hue
+                .partial_cmp(&b.avg_hue)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    a.avg_lightness
+                        .partial_cmp(&b.avg_lightness)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    a.display_name
+                        .to_lowercase()
+                        .cmp(&b.display_name.to_lowercase())
+                }),
+            (false, true) => std::cmp::Ordering::Less,
+            (true, false) => std::cmp::Ordering::Greater,
+            (true, true) => a
+                .avg_lightness
+                .partial_cmp(&b.avg_lightness)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    a.display_name
+                        .to_lowercase()
+                        .cmp(&b.display_name.to_lowercase())
+                }),
+        };
+
+    // Sort groups by gradient
+    folder_items.sort_by(sort_items);
+    // Sort single-app items by gradient
+    single_items.sort_by(sort_items);
+
+    // Combine: groups (same icon) at the beginning, followed by single items
+    let mut final_grid_ids = Vec::new();
+    for folder in folder_items {
+        final_grid_ids.push(folder.id);
+    }
+    for item in single_items {
+        final_grid_ids.push(item.id);
+    }
+
     let new_pages = pack_into_pages(&final_grid_ids);
     let total_pages = new_pages.len();
+
+    // Set active folders in GNOME Shell to only our created icon groups
+    dconf::write_folder_children(&active_folder_ids)
+        .context("Failed to update folder-children in dconf")?;
 
     let new_layout_str = dconf::serialize_layout(&new_pages);
     dconf::write_layout(&new_layout_str).context("Failed to write new layout to dconf")?;
 
-    Ok((backup_path, total_apps, total_pages))
+    Ok((backup_path, total_apps, total_pages, folder_count))
 }
 
 /// Perform random sorting logic on all ungrouped apps
@@ -701,11 +854,11 @@ fn main() -> Result<()> {
             }
             "-g" | "--gradient" => {
                 println!("Sorting GNOME app menu by color gradient...");
-                let (backup_path, total_apps, total_pages) =
+                let (backup_path, total_apps, total_pages, folder_count) =
                     sort_gradient_logic(&current_dir)?;
                 println!(
-                    "Success! Organized {} apps across {} pages.",
-                    total_apps, total_pages
+                    "Success! Organized {} apps across {} pages ({} shared-icon groups at beginning, sorted by gradient).",
+                    total_apps, total_pages, folder_count
                 );
                 println!("Backup saved to: {}", backup_path.display());
                 println!("Press Super key twice to view your updated grid.");
@@ -797,4 +950,22 @@ mod tests {
         assert_eq!(pages[1][0], ("app24.desktop".to_string(), 0));
     }
 
+    #[test]
+    fn test_longest_common_word_prefix() {
+        let names = vec![
+            "Avahi Zeroconf Browser",
+            "Avahi SSH Server Browser",
+            "Avahi VNC Server Browser",
+        ];
+        assert_eq!(
+            longest_common_word_prefix(&names),
+            Some("Avahi".to_string())
+        );
+
+        let names2 = vec!["OpenJDK Java 25 Console", "OpenJDK Java 25 Shell"];
+        assert_eq!(
+            longest_common_word_prefix(&names2),
+            Some("OpenJDK Java 25".to_string())
+        );
+    }
 }
