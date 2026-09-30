@@ -34,6 +34,8 @@ enum AppState {
     RandomComplete,
     AlphaSorting,
     AlphaComplete,
+    FillFirst,
+    FillFirstComplete,
     RestoreList,
     Restoring,
     RestoreComplete,
@@ -79,6 +81,10 @@ impl App {
                     self.perform_alpha_sort();
                     continue;
                 }
+                AppState::FillFirst => {
+                    self.perform_fill_first();
+                    continue;
+                }
                 AppState::Restoring => {
                     self.perform_restore();
                     continue;
@@ -105,6 +111,7 @@ impl App {
                         AppState::SortComplete
                         | AppState::RandomComplete
                         | AppState::AlphaComplete
+                        | AppState::FillFirstComplete
                         | AppState::RestoreComplete
                         | AppState::Error => {
                             if key.code == KeyCode::Esc
@@ -135,7 +142,10 @@ impl App {
             KeyCode::Char('3') | KeyCode::Char('a') => {
                 self.state = AppState::AlphaSorting;
             }
-            KeyCode::Char('4') | KeyCode::Char('b') => {
+            KeyCode::Char('4') | KeyCode::Char('f') => {
+                self.state = AppState::FillFirst;
+            }
+            KeyCode::Char('5') | KeyCode::Char('b') => {
                 self.state = AppState::RestoreList;
                 self.load_backup_files();
             }
@@ -212,7 +222,7 @@ impl App {
         match sort_random_logic(&self.current_dir) {
             Ok((backup_path, total_items, total_pages)) => {
                 self.status_message = format!(
-                    "Random sort complete!\nRandomized {} ungrouped apps across {} pages.\n\nBackup saved to:\n{}\n\nPress Super key twice to view your updated grid.",
+                    "Random sort complete!\nRandomized {} items across {} pages (groups moved to beginning, zero gaps).\n\nBackup saved to:\n{}\n\nPress Super key twice to view your updated grid.",
                     total_items,
                     total_pages,
                     backup_path.file_name().unwrap_or_default().to_string_lossy()
@@ -230,7 +240,7 @@ impl App {
         match sort_alpha_logic(&self.current_dir) {
             Ok((backup_path, total_items, total_pages)) => {
                 self.status_message = format!(
-                    "Alphabetical sort complete!\nSorted {} ungrouped apps across {} pages from A to Z.\n\nBackup saved to:\n{}\n\nPress Super key twice to view your updated grid.",
+                    "Alphabetical sort complete!\nSorted {} items across {} pages from A to Z (groups moved to beginning, zero gaps).\n\nBackup saved to:\n{}\n\nPress Super key twice to view your updated grid.",
                     total_items,
                     total_pages,
                     backup_path.file_name().unwrap_or_default().to_string_lossy()
@@ -239,6 +249,45 @@ impl App {
             }
             Err(e) => {
                 self.error_msg = format!("Failed to sort alphabetically: {:#}", e);
+                self.state = AppState::Error;
+            }
+        }
+    }
+
+    fn perform_fill_first(&mut self) {
+        match fill_first_page_logic(&self.current_dir) {
+            Ok((backup_path, total_items, total_pages, moved_count, folder_count)) => {
+                let group_msg = if folder_count > 0 {
+                    format!(
+                        "{} folder group{} moved to the beginning.",
+                        folder_count,
+                        if folder_count == 1 { "" } else { "s" }
+                    )
+                } else {
+                    "No folder groups found.".to_string()
+                };
+                if moved_count > 0 {
+                    self.status_message = format!(
+                        "First page filled!\n{}\nMoved {} items forward to completely fill the first page (24 items).\nNow {} total items across {} pages.\n\nYour folder groupings were preserved.\n\nBackup saved to:\n{}\n\nPress Super key twice to view your updated grid.",
+                        group_msg,
+                        moved_count,
+                        total_items,
+                        total_pages,
+                        backup_path.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                } else {
+                    self.status_message = format!(
+                        "First page filled!\n{}\nFirst page has 24 items (total {} items across {} pages).\n\nYour folder groupings were preserved.\n\nBackup saved to:\n{}\n\nPress Super key twice to view your updated grid.",
+                        group_msg,
+                        total_items,
+                        total_pages,
+                        backup_path.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                }
+                self.state = AppState::FillFirstComplete;
+            }
+            Err(e) => {
+                self.error_msg = format!("Failed to fill first page: {:#}", e);
                 self.state = AppState::Error;
             }
         }
@@ -281,6 +330,12 @@ impl App {
             AppState::AlphaComplete => {
                 self.draw_complete(frame, "Alphabetical Sort Complete", &self.status_message)
             }
+            AppState::FillFirst => {
+                self.draw_processing(frame, "Filling first page & moving groups to beginning...")
+            }
+            AppState::FillFirstComplete => {
+                self.draw_complete(frame, "First Page Filled", &self.status_message)
+            }
             AppState::RestoreList => self.draw_restore_list(frame),
             AppState::Restoring => self.draw_processing(frame, "Restoring layout from backup..."),
             AppState::RestoreComplete => {
@@ -309,7 +364,8 @@ impl App {
             Line::from("  [1] / [s]  Sort apps by color gradient (rainbow hue)"),
             Line::from("  [2] / [r]  Sort apps randomly"),
             Line::from("  [3] / [a]  Sort apps alphabetically (A to Z)"),
-            Line::from("  [4] / [b]  Restore from backup"),
+            Line::from("  [4] / [f]  Fill first page (move groups to beginning & compact gaps)"),
+            Line::from("  [5] / [b]  Restore from backup"),
             Line::from(""),
             Line::from(Span::styled(
                 "Press 'q' or ESC to exit",
@@ -462,23 +518,103 @@ fn collect_all_apps_ungrouped(
     let mut items = Vec::new();
     let mut seen = HashSet::new();
 
-    // 1. Add all visible desktop apps
+    // 1. Add all visible desktop apps across global and local directories
     for (id, entry) in app_map {
         if entry.is_app && seen.insert(id.clone()) {
             items.push(id.clone());
         }
     }
 
-    // 2. Include any desktop files that were in existing pages
+    // 2. Include any desktop files that were in existing pages (only if valid and executable)
     for page in pages {
         for (id, _) in page {
             if id.ends_with(".desktop") && seen.insert(id.clone()) {
-                items.push(id.clone());
+                if app_map.get(id).map_or(false, |e| e.is_app) {
+                    items.push(id.clone());
+                }
             }
         }
     }
 
     items
+}
+
+/// Collect grid items, placing folder groups at the beginning and gathering all
+/// standalone apps across global and local applications into a unified list without gaps.
+fn collect_grid_items(
+    app_map: &HashMap<String, desktop::DesktopEntry>,
+    pages: &[Vec<(String, u32)>],
+    folder_children: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let mut group_ids = Vec::new();
+    let mut seen_groups = HashSet::new();
+
+    // 1. Groups from folder_children
+    for f in folder_children {
+        if seen_groups.insert(f.clone()) {
+            group_ids.push(f.clone());
+        }
+    }
+
+    // 2. Groups from current pages
+    for page in pages {
+        for (id, _) in page {
+            let is_folder = !id.ends_with(".desktop") || folder_children.contains(id);
+            if is_folder && seen_groups.insert(id.clone()) {
+                group_ids.push(id.clone());
+            }
+        }
+    }
+
+    // 3. Groups from dconf that have at least 2 valid installed apps
+    let all_folders = dconf::read_app_folders().unwrap_or_default();
+    for folder in &all_folders {
+        let valid_count = folder
+            .apps
+            .iter()
+            .filter(|a| app_map.get(*a).map_or(false, |e| e.is_app))
+            .count();
+        if valid_count >= 2 && seen_groups.insert(folder.id.clone()) {
+            group_ids.push(folder.id.clone());
+        }
+    }
+
+    // 4. Apps that are contained inside folders should not be placed on the outer grid
+    let mut apps_in_folders = HashSet::new();
+    for folder in &all_folders {
+        if seen_groups.contains(&folder.id) {
+            for app_id in &folder.apps {
+                apps_in_folders.insert(app_id.clone());
+            }
+        }
+    }
+
+    // 5. Standalone apps from app_map (both global and local together) and existing pages
+    let mut standalone_apps = Vec::new();
+    let mut seen_apps = HashSet::new();
+
+    // From app_map (all visible apps installed on system)
+    for (id, entry) in app_map {
+        if entry.is_app && !apps_in_folders.contains(id) && seen_apps.insert(id.clone()) {
+            standalone_apps.push(id.clone());
+        }
+    }
+
+    // Also preserve any valid desktop items in existing pages
+    for page in pages {
+        for (id, _) in page {
+            if id.ends_with(".desktop")
+                && !apps_in_folders.contains(id)
+                && seen_apps.insert(id.clone())
+            {
+                if app_map.get(id).map_or(false, |e| e.is_app) {
+                    standalone_apps.push(id.clone());
+                }
+            }
+        }
+    }
+
+    (group_ids, standalone_apps)
 }
 
 /// Chunk items into pages with position 0..23 per page (4x6 grid)
@@ -739,7 +875,8 @@ pub fn sort_gradient_logic(output_dir: &Path) -> Result<(PathBuf, usize, usize, 
     Ok((backup_path, total_apps, total_pages, folder_count))
 }
 
-/// Perform random sorting logic on all ungrouped apps
+/// Perform random sorting logic on all standalone apps, preserving folder groups at the beginning
+/// and filling pages consecutively with zero gaps.
 pub fn sort_random_logic(output_dir: &Path) -> Result<(PathBuf, usize, usize)> {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
@@ -753,24 +890,31 @@ pub fn sort_random_logic(output_dir: &Path) -> Result<(PathBuf, usize, usize)> {
 
     let app_map =
         desktop::get_app_map().context("Failed to scan installed desktop applications")?;
-    let mut all_apps = collect_all_apps_ungrouped(&app_map, &pages);
-    let total_items = all_apps.len();
+    let (group_ids, mut standalone_apps) =
+        collect_grid_items(&app_map, &pages, &folder_children);
 
-    let original = all_apps.clone();
+    let original = standalone_apps.clone();
     let mut rng = thread_rng();
     let mut attempts = 0;
     loop {
-        all_apps.shuffle(&mut rng);
+        standalone_apps.shuffle(&mut rng);
         attempts += 1;
-        if all_apps != original || attempts > 50 {
+        if standalone_apps != original || attempts > 50 {
             break;
         }
     }
 
-    let new_pages = pack_into_pages(&all_apps);
+    // Move groups to the beginning, followed by shuffled apps
+    let mut all_items = group_ids.clone();
+    all_items.extend(standalone_apps);
+
+    let total_items = all_items.len();
+    let new_pages = pack_into_pages(&all_items);
     let total_pages = new_pages.len();
 
-    dconf::clear_folder_children().context("Failed to clear folder groupings")?;
+    // Preserve folder-children in dconf
+    dconf::write_folder_children(&group_ids)
+        .context("Failed to update folder-children in dconf")?;
 
     let new_layout_str = dconf::serialize_layout(&new_pages);
     dconf::write_layout(&new_layout_str).context("Failed to write new layout to dconf")?;
@@ -778,7 +922,8 @@ pub fn sort_random_logic(output_dir: &Path) -> Result<(PathBuf, usize, usize)> {
     Ok((backup_path, total_items, total_pages))
 }
 
-/// Perform alphabetical sorting logic on all ungrouped apps
+/// Perform alphabetical sorting logic on all standalone apps, preserving folder groups at the beginning
+/// and filling pages consecutively with zero gaps.
 pub fn sort_alpha_logic(output_dir: &Path) -> Result<(PathBuf, usize, usize)> {
     let layout_str = dconf::read_layout().context("Failed to read current dconf layout")?;
     let pages = dconf::parse_layout(&layout_str).context("Failed to parse dconf layout")?;
@@ -789,10 +934,10 @@ pub fn sort_alpha_logic(output_dir: &Path) -> Result<(PathBuf, usize, usize)> {
 
     let app_map =
         desktop::get_app_map().context("Failed to scan installed desktop applications")?;
-    let mut all_apps = collect_all_apps_ungrouped(&app_map, &pages);
-    let total_items = all_apps.len();
+    let (group_ids, mut standalone_apps) =
+        collect_grid_items(&app_map, &pages, &folder_children);
 
-    all_apps.sort_by(|a, b| {
+    standalone_apps.sort_by(|a, b| {
         let name_a = app_map
             .get(a)
             .map(|e| e.name.to_lowercase())
@@ -804,15 +949,152 @@ pub fn sort_alpha_logic(output_dir: &Path) -> Result<(PathBuf, usize, usize)> {
         name_a.cmp(&name_b)
     });
 
-    let new_pages = pack_into_pages(&all_apps);
+    // Move groups to the beginning, followed by alphabetically sorted apps
+    let mut all_items = group_ids.clone();
+    all_items.extend(standalone_apps);
+
+    let total_items = all_items.len();
+    let new_pages = pack_into_pages(&all_items);
     let total_pages = new_pages.len();
 
-    dconf::clear_folder_children().context("Failed to clear folder groupings")?;
+    // Preserve folder-children in dconf
+    dconf::write_folder_children(&group_ids)
+        .context("Failed to update folder-children in dconf")?;
 
     let new_layout_str = dconf::serialize_layout(&new_pages);
     dconf::write_layout(&new_layout_str).context("Failed to write new layout to dconf")?;
 
     Ok((backup_path, total_items, total_pages))
+}
+
+/// Fill the first app menu page up to ITEMS_PER_PAGE (24) by moving all folder groupings
+/// to the beginning of the grid and shifting single items forward to compact gaps.
+/// Preserves existing manual folders and groupings without un-grouping or modifying their contents.
+/// Discards phantom/uninstalled applications so no visual empty holes remain.
+pub fn fill_first_page_logic(output_dir: &Path) -> Result<(PathBuf, usize, usize, usize, usize)> {
+    let layout_str = dconf::read_layout().context("Failed to read current dconf layout")?;
+    let pages = dconf::parse_layout(&layout_str).context("Failed to parse dconf layout")?;
+    let folder_children = dconf::read_folder_children().unwrap_or_default();
+
+    // Backup both layout and folder configuration before making changes
+    let backup_path = backup::create_backup(&pages, &folder_children, output_dir)
+        .context("Failed to create layout backup")?;
+
+    let app_map =
+        desktop::get_app_map().context("Failed to scan installed desktop applications")?;
+    let all_folders = dconf::read_app_folders().unwrap_or_default();
+
+    // 1. Identify all active folder groups
+    let mut active_folders: Vec<String> = Vec::new();
+    let mut seen_folders = HashSet::new();
+
+    // Folders currently in folder_children
+    for f in &folder_children {
+        if seen_folders.insert(f.clone()) {
+            active_folders.push(f.clone());
+        }
+    }
+
+    // Folder IDs currently placed on pages
+    for page in &pages {
+        for (id, _) in page {
+            let is_folder = !id.ends_with(".desktop") || folder_children.contains(id);
+            if is_folder && seen_folders.insert(id.clone()) {
+                active_folders.push(id.clone());
+            }
+        }
+    }
+
+    // Also include any dconf folder that has at least 2 valid installed apps
+    for folder in &all_folders {
+        let valid_app_count = folder
+            .apps
+            .iter()
+            .filter(|app_id| app_map.get(*app_id).map_or(false, |e| e.is_app))
+            .count();
+        if valid_app_count >= 2 && seen_folders.insert(folder.id.clone()) {
+            active_folders.push(folder.id.clone());
+        }
+    }
+
+    // 2. Identify all apps that are contained inside ANY active folder
+    let mut apps_in_folders = HashSet::new();
+    for folder in &all_folders {
+        if seen_folders.contains(&folder.id) {
+            for app_id in &folder.apps {
+                apps_in_folders.insert(app_id.clone());
+            }
+        }
+    }
+
+    // 3. Collect standalone apps preserving existing page order
+    let mut standalone_apps = Vec::new();
+    let mut seen_apps = HashSet::new();
+
+    // First: preserve apps from existing pages in their current order,
+    // ensuring they are NOT in a folder and ARE valid installed executable apps.
+    for page in &pages {
+        for (id, _) in page {
+            if id.ends_with(".desktop")
+                && !apps_in_folders.contains(id)
+                && app_map.get(id).map_or(false, |e| e.is_app)
+                && seen_apps.insert(id.clone())
+            {
+                standalone_apps.push(id.clone());
+            }
+        }
+    }
+
+    // Second: append any installed apps that were missing from pages and not inside folders
+    for (id, entry) in &app_map {
+        if entry.is_app && !apps_in_folders.contains(id) && seen_apps.insert(id.clone()) {
+            standalone_apps.push(id.clone());
+        }
+    }
+
+    // 4. Combine: Folder groups FIRST at the beginning of Page 0, followed by standalone apps
+    let folder_count = active_folders.len();
+    let mut all_items = active_folders.clone();
+    all_items.extend(standalone_apps);
+
+    let total_items = all_items.len();
+    let new_pages = pack_into_pages(&all_items);
+    let total_pages = new_pages.len();
+
+    let initial_visible_first_page_len = pages
+        .first()
+        .map(|p| {
+            p.iter()
+                .filter(|(id, _)| {
+                    !id.ends_with(".desktop")
+                        || (!apps_in_folders.contains(id)
+                            && app_map.get(id).map_or(false, |e| e.is_app))
+                })
+                .count()
+        })
+        .unwrap_or(0);
+
+    let new_first_page_len = new_pages.first().map(|p| p.len()).unwrap_or(0);
+    let moved_count = if new_first_page_len > initial_visible_first_page_len {
+        new_first_page_len - initial_visible_first_page_len
+    } else {
+        0
+    };
+
+    // 5. Update dconf: sync folder_children and new packed layout
+    dconf::write_folder_children(&active_folders)
+        .context("Failed to update folder-children in dconf")?;
+
+    let new_layout_str = dconf::serialize_layout(&new_pages);
+    dconf::write_layout(&new_layout_str).context("Failed to write new layout to dconf")?;
+
+    Ok((
+        backup_path,
+        total_items,
+        total_pages,
+        moved_count,
+        folder_count,
+    ))
 }
 
 /// Restore layout and folder configuration from a backup file
@@ -844,6 +1126,7 @@ OPTIONS:
     -g, --gradient          Sort apps by color gradient (groups shared-icon apps into folders at beginning)
     -r, --random            Sort apps randomly
     -a, --alpha             Sort apps alphabetically by name (A to Z)
+    -f, --fill-first        Fill first menu page, move groups to beginning, and compact gaps
     -b, --restore <FILE>    Restore layout and folders from a backup TOML file
     -h, --help              Show this help information
     -v, --version           Show version information
@@ -883,7 +1166,7 @@ fn main() -> Result<()> {
                 println!("Sorting GNOME app menu randomly...");
                 let (backup_path, total_items, total_pages) = sort_random_logic(&current_dir)?;
                 println!(
-                    "Success! Randomized {} apps across {} pages.",
+                    "Success! Randomized {} items across {} pages (groups placed at beginning, zero gaps).",
                     total_items, total_pages
                 );
                 println!("Backup saved to: {}", backup_path.display());
@@ -894,9 +1177,31 @@ fn main() -> Result<()> {
                 println!("Sorting GNOME app menu alphabetically...");
                 let (backup_path, total_items, total_pages) = sort_alpha_logic(&current_dir)?;
                 println!(
-                    "Success! Sorted {} apps across {} pages from A to Z.",
+                    "Success! Sorted {} items across {} pages from A to Z (groups placed at beginning, zero gaps).",
                     total_items, total_pages
                 );
+                println!("Backup saved to: {}", backup_path.display());
+                println!("Press Super key twice to view your updated grid.");
+                return Ok(());
+            }
+            "-f" | "--fill-first" => {
+                println!("Filling first menu page and moving groups to beginning...");
+                let (backup_path, total_items, total_pages, moved_count, folder_count) =
+                    fill_first_page_logic(&current_dir)?;
+                if folder_count > 0 {
+                    println!("Moved {} folder group(s) to the beginning.", folder_count);
+                }
+                if moved_count > 0 {
+                    println!(
+                        "Success! Filled first page by moving {} items forward (total {} items across {} pages).",
+                        moved_count, total_items, total_pages
+                    );
+                } else {
+                    println!(
+                        "First page is filled (total {} items across {} pages).",
+                        total_items, total_pages
+                    );
+                }
                 println!("Backup saved to: {}", backup_path.display());
                 println!("Press Super key twice to view your updated grid.");
                 return Ok(());
@@ -966,6 +1271,63 @@ mod tests {
     }
 
     #[test]
+    fn test_compact_and_fill_first_page_with_groups() {
+        // Page 0 has a mix of apps and a group in the middle
+        let mut page0 = Vec::new();
+        page0.push(("app0.desktop".to_string(), 0));
+        page0.push(("app1.desktop".to_string(), 1));
+        page0.push(("my-custom-folder-uuid".to_string(), 2)); // Group in middle
+        for i in 3..18 {
+            page0.push((format!("app{}.desktop", i), i as u32));
+        }
+
+        // Page 1 has another group and some apps
+        let mut page1 = Vec::new();
+        page1.push(("app18.desktop".to_string(), 0));
+        page1.push(("another-group-id".to_string(), 1)); // Group on page 1
+        for i in 2..10 {
+            page1.push((format!("app{}.desktop", i + 18), i as u32));
+        }
+
+        let pages = vec![page0, page1];
+        let folder_children = vec![
+            "my-custom-folder-uuid".to_string(),
+            "another-group-id".to_string(),
+        ];
+        let folder_set: HashSet<String> = folder_children.into_iter().collect();
+
+        let is_group = |id: &str| -> bool { folder_set.contains(id) || !id.ends_with(".desktop") };
+
+        let mut group_items = Vec::new();
+        let mut single_items = Vec::new();
+
+        for page in &pages {
+            for (id, _) in page {
+                if is_group(id) {
+                    group_items.push(id.clone());
+                } else {
+                    single_items.push(id.clone());
+                }
+            }
+        }
+
+        let mut all_items = group_items;
+        all_items.extend(single_items);
+
+        let repacked = pack_into_pages(&all_items);
+        assert_eq!(repacked.len(), 2);
+        assert_eq!(repacked[0].len(), 24);
+
+        // Verify groups are moved to the very beginning of the first page
+        assert_eq!(repacked[0][0].0, "my-custom-folder-uuid");
+        assert_eq!(repacked[0][1].0, "another-group-id");
+
+        // Verify single items follow immediately
+        assert_eq!(repacked[0][2].0, "app0.desktop");
+        assert_eq!(repacked[0][3].0, "app1.desktop");
+    }
+
+    #[test]
     fn test_longest_common_word_prefix() {
         let names = vec![
             "Avahi Zeroconf Browser",
@@ -982,5 +1344,184 @@ mod tests {
             longest_common_word_prefix(&names2),
             Some("OpenJDK Java 25".to_string())
         );
+    }
+
+    #[test]
+    fn test_collect_grid_items_and_pack() {
+        let mut app_map = HashMap::new();
+        // Add global and local apps
+        app_map.insert(
+            "org.gnome.Calculator.desktop".to_string(),
+            desktop::DesktopEntry {
+                id: "org.gnome.Calculator.desktop".to_string(),
+                name: "Calculator".to_string(),
+                icon: "org.gnome.Calculator".to_string(),
+                categories: vec![],
+                is_app: true,
+            },
+        );
+        app_map.insert(
+            "wine-Programs-Game.desktop".to_string(),
+            desktop::DesktopEntry {
+                id: "wine-Programs-Game.desktop".to_string(),
+                name: "Retro Game".to_string(),
+                icon: "wine".to_string(),
+                categories: vec![],
+                is_app: true,
+            },
+        );
+        for i in 0..30 {
+            app_map.insert(
+                format!("sys-app{}.desktop", i),
+                desktop::DesktopEntry {
+                    id: format!("sys-app{}.desktop", i),
+                    name: format!("Sys App {:02}", i),
+                    icon: "app".to_string(),
+                    categories: vec![],
+                    is_app: true,
+                },
+            );
+        }
+
+        let folder_children = vec!["folder-uuid-1".to_string()];
+        let pages = vec![vec![
+            ("folder-uuid-1".to_string(), 0),
+            ("sys-app0.desktop".to_string(), 1),
+        ]];
+
+        let (group_ids, mut standalone_apps) =
+            collect_grid_items(&app_map, &pages, &folder_children);
+        assert_eq!(group_ids, vec!["folder-uuid-1".to_string()]);
+        assert_eq!(standalone_apps.len(), 32);
+
+        // Test alphabetical sort across unified pool (both Wine local and Gnome global)
+        standalone_apps.sort_by(|a, b| {
+            let name_a = app_map.get(a).map(|e| e.name.to_lowercase()).unwrap_or_else(|| a.to_lowercase());
+            let name_b = app_map.get(b).map(|e| e.name.to_lowercase()).unwrap_or_else(|| b.to_lowercase());
+            name_a.cmp(&name_b)
+        });
+
+        // "Calculator" should come first among apps
+        assert_eq!(standalone_apps[0], "org.gnome.Calculator.desktop");
+        // "Retro Game" should be sorted under 'R', between sys-apps
+        assert!(standalone_apps.contains(&"wine-Programs-Game.desktop".to_string()));
+
+        let mut all_items = group_ids;
+        all_items.extend(standalone_apps);
+
+        let new_pages = pack_into_pages(&all_items);
+        assert_eq!(new_pages.len(), 2);
+        // First page is fully packed with 24 items, zero gaps
+        assert_eq!(new_pages[0].len(), 24);
+        assert_eq!(new_pages[0][0].0, "folder-uuid-1"); // Folder group at index 0
+        assert_eq!(new_pages[0][1].0, "org.gnome.Calculator.desktop"); // Calculator immediately follows
+        for (pos, (_, p)) in new_pages[0].iter().enumerate() {
+            assert_eq!(*p, pos as u32);
+        }
+
+        // Second page has the remaining 9 items, packed consecutively
+        assert_eq!(new_pages[1].len(), 9);
+        for (pos, (_, p)) in new_pages[1].iter().enumerate() {
+            assert_eq!(*p, pos as u32);
+        }
+    }
+
+    #[test]
+    fn test_fill_first_page_logic_removes_phantoms_and_folder_apps() {
+        let mut app_map = HashMap::new();
+        // 30 real installed apps
+        for i in 0..30 {
+            app_map.insert(
+                format!("real-app{}.desktop", i),
+                desktop::DesktopEntry {
+                    id: format!("real-app{}.desktop", i),
+                    name: format!("Real App {:02}", i),
+                    icon: "app".to_string(),
+                    categories: vec![],
+                    is_app: true,
+                },
+            );
+        }
+        // A phantom app (is_app = false)
+        app_map.insert(
+            "phantom.desktop".to_string(),
+            desktop::DesktopEntry {
+                id: "phantom.desktop".to_string(),
+                name: "Phantom".to_string(),
+                icon: "phantom".to_string(),
+                categories: vec![],
+                is_app: false,
+            },
+        );
+
+        // App inside folder
+        let folder_id = "folder-tools".to_string();
+        let apps_in_folder = vec!["real-app0.desktop".to_string(), "real-app1.desktop".to_string()];
+
+        let active_folders = vec![folder_id.clone()];
+        let apps_in_folders_set: HashSet<String> = apps_in_folder.into_iter().collect();
+
+        // Existing page 0 has:
+        // folder-tools, real-app0 (which is in folder!), phantom.desktop, deleted-app.desktop (not in app_map),
+        // and some real apps
+        let mut page0 = vec![
+            (folder_id.clone(), 0),
+            ("real-app0.desktop".to_string(), 1),
+            ("phantom.desktop".to_string(), 2),
+            ("deleted-app.desktop".to_string(), 3),
+        ];
+        for i in 2..20 {
+            page0.push((format!("real-app{}.desktop", i), i as u32 + 2));
+        }
+
+        let mut page1 = Vec::new();
+        for i in 20..30 {
+            page1.push((format!("real-app{}.desktop", i), (i - 20) as u32));
+        }
+
+        let pages = vec![page0, page1];
+
+        // Process items as fill_first_page_logic does:
+        let mut standalone_apps = Vec::new();
+        let mut seen_apps = HashSet::new();
+
+        for page in &pages {
+            for (id, _) in page {
+                if id.ends_with(".desktop")
+                    && !apps_in_folders_set.contains(id)
+                    && app_map.get(id).map_or(false, |e| e.is_app)
+                    && seen_apps.insert(id.clone())
+                {
+                    standalone_apps.push(id.clone());
+                }
+            }
+        }
+
+        for (id, entry) in &app_map {
+            if entry.is_app && !apps_in_folders_set.contains(id) && seen_apps.insert(id.clone()) {
+                standalone_apps.push(id.clone());
+            }
+        }
+
+        let mut all_items = active_folders.clone();
+        all_items.extend(standalone_apps);
+
+        let new_pages = pack_into_pages(&all_items);
+
+        // 1 folder + 28 valid standalone apps (30 - 2 in folder) = 29 total items
+        assert_eq!(all_items.len(), 29);
+        assert_eq!(new_pages.len(), 2);
+        // Page 0 is fully filled with 24 items, zero gaps!
+        assert_eq!(new_pages[0].len(), 24);
+        assert_eq!(new_pages[0][0].0, "folder-tools"); // folder at pos 0
+        // No phantom or inside-folder apps exist in new_pages
+        for page in &new_pages {
+            for (id, _) in page {
+                assert_ne!(id, "phantom.desktop");
+                assert_ne!(id, "deleted-app.desktop");
+                assert_ne!(id, "real-app0.desktop");
+                assert_ne!(id, "real-app1.desktop");
+            }
+        }
     }
 }
