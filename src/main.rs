@@ -667,23 +667,38 @@ pub fn sort_gradient_logic(output_dir: &Path) -> Result<(PathBuf, usize, usize, 
 
     let folder_count = folder_items.len();
 
-    // Sort comparator: chromatic items sorted by rainbow hue (0..360), monochrome items sorted by lightness
+    // Effective hue: shift hue so red (around 345°-360° and 0°-15°) starts continuously at the beginning of the rainbow
+    let effective_hue = |hue: f32| -> f32 {
+        let shifted = (hue - 345.0) % 360.0;
+        if shifted < 0.0 {
+            shifted + 360.0
+        } else {
+            shifted
+        }
+    };
+
+    // Sort comparator:
+    // 1. Chromatic items sorted by continuous rainbow hue (effective_hue), then lightness
+    // 2. Dark/monochrome items placed together, sorted by lightness (so all dark/black icons like Terminal, Antigravity, Obsidian, CMake are grouped together!)
     let sort_items =
         |a: &GridItemSortData, b: &GridItemSortData| match (a.is_monochrome, b.is_monochrome) {
-            (false, false) => a
-                .avg_hue
-                .partial_cmp(&b.avg_hue)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    a.avg_lightness
-                        .partial_cmp(&b.avg_lightness)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| {
-                    a.display_name
-                        .to_lowercase()
-                        .cmp(&b.display_name.to_lowercase())
-                }),
+            (false, false) => {
+                let eff_a = effective_hue(a.avg_hue);
+                let eff_b = effective_hue(b.avg_hue);
+                eff_a
+                    .partial_cmp(&eff_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        a.avg_lightness
+                            .partial_cmp(&b.avg_lightness)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| {
+                        a.display_name
+                            .to_lowercase()
+                            .cmp(&b.display_name.to_lowercase())
+                    })
+            }
             (false, true) => std::cmp::Ordering::Less,
             (true, false) => std::cmp::Ordering::Greater,
             (true, true) => a
