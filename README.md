@@ -1,5 +1,8 @@
 # GNOME App Menu Gradient Sorter (`appmenu-gradient-sort`)
 
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org)
+
 `appmenu-gradient-sort` is a fast, terminal-based utility and CLI tool written in Rust to automatically organize your GNOME Shell application grid. It can sort your apps into a smooth, continuous rainbow color gradient based on their icon colors, sort them alphabetically, or randomize them—all while safely backing up your layout and folder configurations before any modification.
 
 ---
@@ -194,4 +197,4 @@ Backups can be committed to your dotfiles or restored at any time via the TUI or
 
 ## 📄 License
 
-MIT
+This project is licensed under the GNU General Public License v3.0 (GPLv3) - see the [LICENSE](file:///mnt/Storage/sbls/Downloads/gnome_appmenu_sort/LICENSE) file for details.
