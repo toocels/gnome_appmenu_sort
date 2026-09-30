@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use anyhow::{Context, Result};
 use std::process::Command;
 
@@ -132,7 +133,22 @@ pub fn clear_folder_children() -> Result<()> {
 /// Read configured app folders from org.gnome.desktop.app-folders
 #[allow(dead_code)]
 pub fn read_app_folders() -> Result<Vec<AppFolder>> {
-    let folder_ids = read_folder_children()?;
+    let mut folder_ids = read_folder_children().unwrap_or_default();
+    let mut seen: HashSet<String> = folder_ids.iter().cloned().collect();
+
+    // Also include any non-.desktop IDs found in the current layout
+    if let Ok(layout_str) = read_layout() {
+        if let Ok(pages) = parse_layout(&layout_str) {
+            for page in pages {
+                for (id, _) in page {
+                    if !id.ends_with(".desktop") && seen.insert(id.clone()) {
+                        folder_ids.push(id);
+                    }
+                }
+            }
+        }
+    }
+
     let mut folders = Vec::new();
 
     for fid in folder_ids {

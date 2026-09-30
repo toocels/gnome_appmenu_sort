@@ -1,5 +1,4 @@
 use anyhow::Result;
-use image::GenericImageView;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,27 +15,51 @@ pub struct IconInfo {
     pub is_monochrome: bool, // true if low saturation or dark/black or near white
 }
 
-/// Resolve an icon name to a file path on disk
+/// Resolve an icon name to a file path on disk, falling back to standard GNOME fallback icons if not found
 pub fn resolve_icon(icon_name: &str) -> Option<PathBuf> {
     let clean_icon = icon_name.trim();
     if clean_icon.is_empty() {
         return None;
     }
 
-    let direct_path = Path::new(clean_icon);
+    if let Some(path) = resolve_icon_exact(clean_icon) {
+        return Some(path);
+    }
+
+    // Standard GNOME / Freedesktop fallbacks for apps whose specific icon cannot be found
+    let fallbacks = [
+        "application-x-executable",
+        "applications-system",
+        "system-run",
+        "preferences-system",
+        "application-default-icon",
+    ];
+
+    for fb in &fallbacks {
+        if let Some(path) = resolve_icon_exact(fb) {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+/// Helper to resolve a specific icon name without applying generic fallbacks
+fn resolve_icon_exact(icon_name: &str) -> Option<PathBuf> {
+    let direct_path = Path::new(icon_name);
     if direct_path.is_absolute() && direct_path.exists() {
         return Some(direct_path.to_path_buf());
     }
 
     // Strip trailing image extension if present
-    let stem = if let Some(stripped) = clean_icon
+    let stem = if let Some(stripped) = icon_name
         .strip_suffix(".png")
-        .or_else(|| clean_icon.strip_suffix(".svg"))
-        .or_else(|| clean_icon.strip_suffix(".xpm"))
+        .or_else(|| icon_name.strip_suffix(".svg"))
+        .or_else(|| icon_name.strip_suffix(".xpm"))
     {
         stripped
     } else {
-        clean_icon
+        icon_name
     };
 
     let extensions = ["png", "svg", "xpm"];
@@ -317,39 +340,46 @@ fn parse_svg_colors(path: &Path) -> Result<IconInfo> {
     })
 }
 
-/// Analyze pixels from a loaded DynamicImage using circular statistics for hue
+/// Analyze pixels from a loaded DynamicImage using circular statistics for hue.
+/// Completely ignores transparent pixels (alpha < 32) so transparent background
+/// does not dilute or skew the average color calculation.
 fn analyze_dynamic_image(img: &image::DynamicImage, path: &Path) -> Result<IconInfo> {
-    let (width, height) = img.dimensions();
+    let rgba_img = img.to_rgba8();
+    let (width, height) = rgba_img.dimensions();
     let step = ((width * height) / 10000).max(1);
 
     let mut sum_x = 0.0f32;
     let mut sum_y = 0.0f32;
     let mut sum_sat = 0.0f32;
     let mut sum_light = 0.0f32;
+    let mut total_alpha_weight = 0.0f32;
     let mut count = 0u32;
 
-    for (x, y, pixel) in img.pixels() {
+    for (x, y, pixel) in rgba_img.enumerate_pixels() {
         if (x + y * width) % step != 0 {
             continue;
         }
 
         let [r, g, b, a] = pixel.0;
-        if a < 128 {
-            continue; // Skip transparent background pixels
+        // Do not include transparent background pixels in average color calculation
+        if a < 32 {
+            continue;
         }
 
+        let alpha_factor = a as f32 / 255.0;
         let (h, s, l) = rgb_to_hsl(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
 
         let rad = h * 2.0 * std::f32::consts::PI;
-        let weight = s; // Weight circular vector by saturation
+        let weight = s * alpha_factor; // Weight circular vector by saturation and opacity
         sum_x += weight * rad.cos();
         sum_y += weight * rad.sin();
-        sum_sat += s;
-        sum_light += l;
+        sum_sat += s * alpha_factor;
+        sum_light += l * alpha_factor;
+        total_alpha_weight += alpha_factor;
         count += 1;
     }
 
-    if count == 0 {
+    if count == 0 || total_alpha_weight < 0.001 {
         return Ok(IconInfo {
             name: path.to_string_lossy().to_string(),
             path: Some(path.to_path_buf()),
@@ -360,8 +390,8 @@ fn analyze_dynamic_image(img: &image::DynamicImage, path: &Path) -> Result<IconI
         });
     }
 
-    let avg_saturation = sum_sat / count as f32;
-    let avg_lightness = sum_light / count as f32;
+    let avg_saturation = sum_sat / total_alpha_weight;
+    let avg_lightness = sum_light / total_alpha_weight;
 
     let mut avg_rad = sum_y.atan2(sum_x);
     if avg_rad < 0.0 {
@@ -523,5 +553,65 @@ mod tests {
         let (h, s, _l) = rgb_to_hsl(0.0, 0.0, 1.0);
         assert!((h * 360.0 - 240.0).abs() < 1e-4);
         assert!((s - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_analyze_dynamic_image_transparent_pixels_ignored() {
+        use image::{ImageBuffer, Rgba};
+        // Create an image that is 90% transparent with black [0, 0, 0, 0]
+        // and 10% pure bright yellow [255, 255, 0, 255]
+        let width = 20;
+        let height = 20;
+        let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                if x < 4 && y < 5 {
+                    // 20 pixels of bright yellow
+                    img.put_pixel(x, y, Rgba([255, 255, 0, 255]));
+                } else {
+                    // 380 pixels of transparent background
+                    img.put_pixel(x, y, Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
+        let dynamic_img = image::DynamicImage::ImageRgba8(img);
+        let info = analyze_dynamic_image(&dynamic_img, Path::new("test.png")).unwrap();
+
+        // The transparent pixels must NOT pull lightness to 0 or saturation to 0
+        assert!(
+            !info.is_monochrome,
+            "Icon should not be classified as monochrome"
+        );
+        assert!(
+            (info.avg_hue - 60.0).abs() < 5.0,
+            "Hue should be yellow (~60deg), got {}",
+            info.avg_hue
+        );
+        assert!(
+            (info.avg_saturation - 1.0).abs() < 0.1,
+            "Saturation should be near 1.0, got {}",
+            info.avg_saturation
+        );
+        assert!(
+            (info.avg_lightness - 0.5).abs() < 0.1,
+            "Lightness should be near 0.5, got {}",
+            info.avg_lightness
+        );
+    }
+
+    #[test]
+    fn test_hwloc_icon_fallback_color() {
+        let info = get_icon_info("hwloc");
+        // On systems with application-x-executable fallback, it should resolve a path
+        if let Some(path) = &info.path {
+            println!("hwloc resolved to: {:?}", path);
+            println!(
+                "hwloc info: hue={}, sat={}, light={}, mono={}",
+                info.avg_hue, info.avg_saturation, info.avg_lightness, info.is_monochrome
+            );
+            assert!(!info.is_monochrome);
+            // Yellow / gold / amber range (around 30-65 degrees)
+            assert!(info.avg_hue > 20.0 && info.avg_hue < 70.0);
+        }
     }
 }
