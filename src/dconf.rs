@@ -45,6 +45,24 @@ pub fn write_layout(layout_str: &str) -> Result<()> {
     Ok(())
 }
 
+/// Read the dash/taskbar favorite app IDs (org.gnome.shell favorite-apps).
+/// On some GNOME Shell versions these apps don't get a separate tile in the app
+/// grid even though a position can still be reserved for them there, leaving a
+/// visibly blank (but "filled" per dconf) slot. Callers use this to skip placing
+/// favorited apps in the grid entirely.
+pub fn read_favorite_apps() -> Vec<String> {
+    let output = Command::new("gsettings")
+        .args(["get", "org.gnome.shell", "favorite-apps"])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            parse_string_list(String::from_utf8_lossy(&out.stdout).trim())
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Read folder-children IDs from org.gnome.desktop.app-folders
 pub fn read_folder_children() -> Result<Vec<String>> {
     let output = Command::new("dconf")
