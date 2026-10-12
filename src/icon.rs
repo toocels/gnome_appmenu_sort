@@ -490,6 +490,17 @@ pub fn get_icon_info_for_key(key: &str) -> IconInfo {
     get_icon_info(key)
 }
 
+/// Resolve the icon grouping key for a desktop entry (its resolved icon path, or icon name)
+pub fn resolve_icon_key(entry: &crate::desktop::DesktopEntry) -> String {
+    if entry.icon.is_empty() {
+        "application-default-icon".to_string()
+    } else if let Some(resolved) = resolve_icon(&entry.icon) {
+        resolved.to_string_lossy().to_string()
+    } else {
+        entry.icon.clone()
+    }
+}
+
 /// Group apps by their icon (using resolved icon path if available, or icon name)
 pub fn group_apps_by_icon(
     app_ids: &[String],
@@ -499,14 +510,7 @@ pub fn group_apps_by_icon(
 
     for id in app_ids {
         if let Some(entry) = app_map.get(id) {
-            let key = if entry.icon.is_empty() {
-                "application-default-icon".to_string()
-            } else if let Some(resolved) = resolve_icon(&entry.icon) {
-                resolved.to_string_lossy().to_string()
-            } else {
-                entry.icon.clone()
-            };
-            groups.entry(key).or_default().push(id.clone());
+            groups.entry(resolve_icon_key(entry)).or_default().push(id.clone());
         } else {
             groups.entry(id.clone()).or_default().push(id.clone());
         }

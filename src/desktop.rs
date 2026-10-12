@@ -212,6 +212,46 @@ pub fn parse_desktop_file_with_base(path: &Path, base_dir: Option<&Path>) -> Res
     })
 }
 
+/// Directories to search for a command, beyond the current process's PATH.
+/// This tool can be launched from contexts with a minimal PATH (a GNOME keybinding,
+/// a systemd service, a script) that differs from the user's interactive shell PATH.
+/// Without this, the exact same app can validate as installed in one invocation and
+/// not in another, making sorts produce a different (and visually incomplete) item
+/// count run to run even though nothing was actually installed or removed.
+fn command_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in path_var.split(':') {
+            if !dir.is_empty() {
+                dirs.push(PathBuf::from(dir));
+            }
+        }
+    }
+
+    for dir in [
+        "/usr/local/sbin",
+        "/usr/local/bin",
+        "/usr/sbin",
+        "/usr/bin",
+        "/sbin",
+        "/bin",
+        "/snap/bin",
+        "/var/lib/flatpak/exports/bin",
+    ] {
+        dirs.push(PathBuf::from(dir));
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".local/bin"));
+        dirs.push(home.join(".local/share/flatpak/exports/bin"));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|d| seen.insert(d.clone()));
+    dirs
+}
+
 fn check_command_exists(cmd: &str) -> bool {
     let clean = cmd.trim();
     if clean.is_empty() {
@@ -226,14 +266,7 @@ fn check_command_exists(cmd: &str) -> bool {
     if p.is_absolute() {
         return p.exists();
     }
-    if let Ok(path_var) = std::env::var("PATH") {
-        for dir in path_var.split(':') {
-            if !dir.is_empty() && Path::new(dir).join(bin).exists() {
-                return true;
-            }
-        }
-    }
-    false
+    command_search_dirs().iter().any(|dir| dir.join(bin).exists())
 }
 
 /// Get all valid app desktop entries across both local user and global system locations

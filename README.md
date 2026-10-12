@@ -18,15 +18,18 @@
 
 - 📁 **Shared-Icon App Folder Creation**:
   - **Ungrouped Analysis**: Begins by breaking up previous arbitrary folder structures to evaluate every installed desktop application individually.
-  - **Automatic GNOME Folder Grouping**: Apps that share the exact same icon asset (e.g., OpenJDK Java consoles, Avahi network browsers) are grouped into dedicated GNOME Shell folders (`org.gnome.desktop.app-folders`).
+  - **Automatic GNOME Folder Grouping**: Apps that share the exact same icon asset (e.g., OpenJDK Java consoles, Avahi network browsers) are grouped into dedicated GNOME Shell folders (`org.gnome.desktop.app-folders`). This happens for **every** sort mode below, not just the gradient sort.
   - **Smart Folder Naming**: Automatically titles folders using the longest common word prefix (e.g., _"OpenJDK Java 25"_ or _"Avahi"_), falling back to sanitized icon titles.
-  - **Beginning Placement**: All generated shared-icon folders are positioned at the very **beginning** of Page 0 and sorted by gradient among themselves.
+  - **Configurable Placement**: Folders can be pinned at the very beginning of the grid, or left mixed in with regular apps (sorted/shuffled alongside them, per sort mode) — see "Settings" section below.
 
 - 🔤 **Alphabetical Sort**:
   - Sorts all apps from A to Z based on their localized application names.
 
 - 🔀 **Random Shuffle**:
   - Randomizes all apps across grid pages for a fresh layout.
+
+- 🧹 **Compact Grid**:
+  - Packs every page edge-to-edge with zero gaps (not just the first page), preserving each app's current relative order while removing stale/uninstalled entries.
 
 - 💾 **Automatic Backups & Full Reversion**:
   - Automatically creates a timestamped TOML backup (`appmenu-*.appmenu-backup.toml`) before applying any changes.
@@ -35,6 +38,9 @@
 - 🖼️ **Comprehensive Icon Resolution**:
   - Resolves active GNOME icon themes (`gsettings get org.gnome.desktop.interface icon-theme`), user themes (`~/.icons`, `~/.local/share/icons`), system themes (`/usr/share/icons`), and Flatpak/Snap exports.
   - Supports modern `.svg` vector icons via `librsvg` (`rsvg-convert`) with a built-in XML hex fallback, as well as `.png`, `.jpg`, and `.xpm` raster icons.
+
+- ⚙️ **Adjustable Settings**:
+  - Icon grouping, group placement, items-per-page, and dash-favorite handling are all toggleable from the TUI and persisted across runs (and honored by the CLI flags too). See "Settings" section.
 
 - 🖥️ **Both Interactive TUI and Scriptable CLI**:
   - Built-in terminal UI (Ratatui & Crossterm) with intuitive keyboard navigation.
@@ -119,15 +125,20 @@ appmenu-gradient-sort
 
 #### Keyboard Shortcuts
 
-| Key                  | Action                                                                    |
-| -------------------- | ------------------------------------------------------------------------- |
-| `1` or `s`           | Sort apps by color gradient (rainbow spectrum, shared-icon folders first) |
-| `2` or `r`           | Sort apps randomly                                                        |
-| `3` or `a`           | Sort apps alphabetically (A to Z)                                         |
-| `4` or `b`           | Open the backup restoration list                                          |
-| `↑` / `k`, `↓` / `j` | Navigate backups in the restore menu                                      |
-| `Enter`              | Confirm restore / return to main menu                                     |
-| `q` or `Esc`         | Quit the application                                                      |
+| Key                  | Action                                                      |
+| -------------------- | ------------------------------------------------------------ |
+| `1` or `s`           | Sort apps by color gradient (rainbow spectrum)              |
+| `2` or `r`           | Sort apps randomly                                           |
+| `3` or `a`           | Sort apps alphabetically (A to Z)                            |
+| `4` or `f`           | Compact grid (fill every page, zero gaps)                   |
+| `5` or `b`           | Open the backup restoration list                             |
+| `g`                  | Toggle: group apps sharing an icon into folders              |
+| `p`                  | Toggle: icon-group placement (beginning vs. mixed in with apps) |
+| `-` / `+`            | Decrease / increase items-per-page                           |
+| `v`                  | Toggle: skip dash-favorited apps in the grid                  |
+| `↑` / `k`, `↓` / `j` | Navigate backups in the restore menu                          |
+| `Enter`              | Confirm restore / return to main menu                        |
+| `q` or `Esc`         | Quit the application                                          |
 
 > **Tip**: After sorting or restoring, press the <kbd>Super</kbd> key twice (or open and close the Activities overview) to refresh the GNOME Shell app grid.
 
@@ -147,6 +158,9 @@ appmenu-gradient-sort --alpha
 # Sort randomly
 appmenu-gradient-sort --random
 
+# Compact grid: fill every page with zero gaps (no reordering)
+appmenu-gradient-sort --fill-first
+
 # Restore layout and folders from a specific backup file
 appmenu-gradient-sort --restore path/to/appmenu-2026-09-30_15-15-24.appmenu-backup.toml
 
@@ -156,6 +170,23 @@ appmenu-gradient-sort --help
 # Show version
 appmenu-gradient-sort --version
 ```
+
+> CLI flags honor whichever settings (see below) were last saved from the TUI — or the defaults, if you've never opened it.
+
+---
+
+## 🛠️ Settings
+
+All four preferences below are toggled from the TUI main menu, apply to **every** sort mode (gradient, alphabetical, random, and compact), and persist to `~/.config/appmenu-gradient-sort/config.toml` between runs.
+
+| Key       | Setting                 | Default | Description                                                                                                                                                              |
+| --------- | ----------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `g`       | `group_icons`           | ON      | Group apps that share the same icon into a GNOME folder. Off = flatten every folder (yours and ours) back to standalone apps.                                         |
+| `p`       | `groups_at_beginning`   | ON      | Pin icon-groups at the very beginning of the grid. Off = leave them mixed in with regular apps, ordered/shuffled per whichever sort mode is running.                  |
+| `-` / `+` | `items_per_page`        | 24      | How many icons fit on one app-grid page. GNOME computes this at runtime from your screen/monitor/icon-size and doesn't expose it anywhere readable — count the rows × columns you actually see in the GNOME Overview and set this to match, or every page will have a few blank trailing slots. |
+| `v`       | `skip_favorite_apps`    | ON      | Don't place apps pinned to your dash/taskbar in the grid at all. On some GNOME Shell versions a favorited app gets no tile in the app grid even though a slot is still reserved for it there — this avoids wasting that slot on an icon that will render blank. |
+
+> **Why gaps can still appear**: if you still see blank cells after tuning `items_per_page`, check whether the missing app(s) are in your dash (`gsettings get org.gnome.shell favorite-apps`) — `skip_favorite_apps` (on by default) should already route around this, but if you've turned it off, that's almost always the cause.
 
 ---
 
@@ -172,6 +203,10 @@ This tool interacts directly with GNOME Shell's native configuration schema:
   ```bash
   dconf read /org/gnome/desktop/app-folders/folder-children
   dconf read /org/gnome/desktop/app-folders/folders/<folder-id>/
+  ```
+- **Dash/Taskbar Favorites** (read-only, used by the `skip_favorite_apps` setting):
+  ```bash
+  gsettings get org.gnome.shell favorite-apps
   ```
 
 ---
@@ -199,4 +234,4 @@ Backups can be committed to your dotfiles or restored at any time via the TUI or
 
 ## 📄 License
 
-This project is licensed under the GNU General Public License v3.0 (GPLv3) - see the [LICENSE](file:///mnt/Storage/sbls/Downloads/gnome_appmenu_sort/LICENSE) file for details.
+This project is licensed under the GNU General Public License v3.0 (GPLv3) - see the [LICENSE](LICENSE) file for details.
